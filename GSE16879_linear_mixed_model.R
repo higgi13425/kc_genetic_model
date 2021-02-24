@@ -3,27 +3,28 @@ library(stringr)
 library(lmerTest)
 library(tidyverse)
 library(purrr)
-library(easystats)
 
 # load dataset
-data <- read.csv("AntiTNF_expr_pheno.csv")
+data <- read.csv("AntiTNF_expr_pheno.csv", check.names = FALSE)
+
 
 # filter out controls
 data %>%
-  filter(str_detect(title, "UC|CD")) ->
+  janitor::clean_names() %>% 
+  filter(str_detect(data$ID, "UC|CD")) ->
 data_filter_nocontrols
 
 
 # Create new column for time point
 data_filter_nocontrols %>%
-  separate(title, c("ID", "Relationship to IFX"), sep="_") ->
+  separate(data$ID, c("ID", "Relationship to IFX"), sep="_") ->
 data_filter_nocontrols 
 
 
-# Rename Response and Time Point Columns
+## Make Predictors Factor Variables
 data_filter_nocontrols %>%
-  rename(Response=response.to.infliximab.ch1) %>%
-  rename(Time=before.or.after.first.infliximab.treatment.ch1) ->
+  mutate(Response = as.factor(Response)) %>%
+  mutate(Time = as.factor(Time))  ->
 data_filter_nocontrols
 
 
@@ -32,57 +33,52 @@ table(data_filter_nocontrols$Response, data_filter_nocontrols$Time)
 
 
 ##Model
-model<-lmer(X1007_s_at ~ (1|ID) + Response + Time + Response:Time, data = data_filter_nocontrols)
-anova(model)
-
-## Create vector of transcript only information for Model 
-# data_filter_nocontrols %>%
-#   select(X1007_s_at:AFFX.TrpnX.M_at) %>%
-#   names() ->
-# transcripts
+model<-lmer(x1007_s_at ~ (1|ID) + Disease + Tissue + Response + Time + Response:Time, data = data_filter_nocontrols)
+summary(model)
 
 
-## Run model on each transcript
+## Run model on each transcript (affx_trpn_x_m_at when ready to run whole dataset)
 data_filter_nocontrols %>%
-  dplyr::select(X1007_s_at:X121_at) %>%
-  map(~lmer(.x ~ (1|ID) + Response + Time + Response:Time, data=data_filter_nocontrols)) ->
-models_list
+  dplyr::select(x1007_s_at:x1552379_at) %>%
+  map(~lmer(.x ~ (1|ID) + Response + Time + Response:Time, data=data_filter_nocontrols)) %>%
+  map_dfr(~ broom::tidy(.), .id = 'ID') ->
+models_dtf
 
 
-# summary
-models_list %>% 
-  map(summary, .id = ".x") %>% 
-  map_dfr(insight::get_parameters, .id = "transcript") %>% 
-  janitor::clean_names() %>% 
-  mutate(parameter = as.numeric(parameter)) %>% 
-  filter(parameter <5) %>% 
-  select(transcript: estimate_1, estimate_5) %>% 
-  rename(estimate = estimate_1) %>% 
-  rename(p_value = estimate_5) %>% 
-  mutate(parameter = case_when(
-    parameter == 1 ~ "intercept",
-    parameter == 2 ~ "response_yes",
-    parameter == 3 ~ "time_beforeIFX",
-    parameter == 4 ~ "time*response"
-  ))
+## Add FDR (False Discovery Rate) column
+models_dtf %>%
+  mutate(p.fdr = p.adjust(p.value, method="fdr")) ->
+models_dtf
 
 
+## Create separate data frame for interaction terms only
+models_dtf %>%
+  select(ID, term, estimate, p.value, p.fdr) %>%
+  filter(term=='ResponseYes:TimeBefore first infliximab treatment') %>%
+  select(-term) ->
+interactions_only_dtf
 
-## Other loop example
-#Assign outcome variables (i.e. transcripts)
-# out_start=9
-# out_end= 54683
-# out_nvar=out_end-out_start+1
-# 
-# out_variable=rep(NA, out_nvar)
-# out_beta=rep(NA, out_nvar)
-# out_se = rep(NA, out_nvar)
-# out_pvalue=rep(NA, out_nvar)
 
-# Loop to run model on every transcript
-for (i in out_start:out_end){
-  outcome = colnames(data_filter_nocontrols)[i]
-    model <- lmer(get(outcome) ~ (1|ID) + Response*Time, data = data_filter_nocontrols)}
-    
-# Create dataframe with results
-outcome = data.frame(out_variable, out_beta, out_se, out_pvalue)
+## Remove "x" prefix assigned to numeric transcripts
+sub("x", "", interactions_only_dtf$ID) ->
+  interactions_only_dtf$ID
+
+## Merge with transcript information
+transcript_info <- read.csv("Transcript Information.csv")
+
+transcript_info %>%
+  select('ID', 'Gene.Title', 'Gene.Symbol')->
+transcript_info
+
+left_join(interactions_only_dtf, transcript_info, by= "ID") ->
+Final_Results_Interactions_Transcripts
+
+
+## Arrange by lowest p-value
+Final_Results_Interactions_Transcripts %>%
+  arrange(p.fdr) ->
+Final_Results_Interactions_Transcripts
+
+  
+# Write output to file
+write.csv(Final_Results_Interactions_Transcripts, file="Final_Results_Time_Response_Interactions_Transcripts.csv")
